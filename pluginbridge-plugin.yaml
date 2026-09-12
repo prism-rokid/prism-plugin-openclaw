@@ -4,14 +4,18 @@ display_name: OpenClaw
 icon_url: https://registry.npmmirror.com/@lobehub/icons-static-avatar/latest/files/avatars/openclaw.webp
 icon_svg_url: https://registry.npmmirror.com/@lobehub/icons-static-svg/latest/files/icons/openclaw.svg
 description: Connects Prism to the OpenClaw gateway protocol with native session listing, history reads, and bidirectional runtime sync.
-version: 0.2.2
+version: 0.2.3
 plugin_protocol_version: "4"
 min_hub_version: 0.1.0
 integration_mode: protocol-native
 transport: process
-mode: native
 runtime_modes: [native]
 default_runtime_mode: native
+managed_launch_specs:
+  - kind: service
+    start: ["openclaw", "gateway", "start"]
+    ready: probe
+    ready_timeout_ms: 60000
 runtime_controls:
   native:
     model: stable

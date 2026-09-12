@@ -1,12 +1,18 @@
 {
   "id": "openclaw",
   "name": "OpenClaw Native Adapter",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "rokid-official",
   "type": "pluginbridge-plugin",
   "entry": "pluginbridge-plugin.yaml",
   "build": {
-    "command": ["go", "build", "-o", "./bin/prism-plugin-openclaw", "./cmd/openclaw-adapter"]
+    "command": [
+      "go",
+      "build",
+      "-o",
+      "./bin/prism-plugin-openclaw",
+      "./cmd/openclaw-adapter"
+    ]
   },
   "license": "MIT"
 }
