@@ -60,5 +60,5 @@ developers must run the build command above after changing Go source.
 For normal product usage, plugin install / remove goes through Prism Desktop, not the public CLI surface.
 
 The package is intentionally independent from Prism Hub internals. It imports
-the public Go module `github.com/Rokid-Prism/prism-plugin-sdk`; forks should
+the public Go module `github.com/Prism-Rokid/prism-plugin-sdk`; forks should
 use that released module rather than a local `replace` directive.
