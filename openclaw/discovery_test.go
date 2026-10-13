@@ -129,6 +129,67 @@ func TestGatewayAgentEndPhaseCompletesRun(t *testing.T) {
 	}
 }
 
+func TestGatewayAgentStartAndEndPhasesProjectTerminalRunState(t *testing.T) {
+	started := runFromAgentEvent(map[string]any{"phase": "start"})
+	if started["status"] != "running" || started["primary_action"] != "interrupt" {
+		t.Fatalf("start phase projection = %+v", started)
+	}
+	ended := runFromAgentEvent(map[string]any{"phase": "end"})
+	if ended["status"] != "completed" || ended["primary_action"] != "send" {
+		t.Fatalf("end phase projection = %+v", ended)
+	}
+}
+
+func TestSubscribePluginConfirmsTerminalRunWhenGatewayOmitsEndEvent(t *testing.T) {
+	fake := &fakeRPCClient{
+		responses: map[string]map[string]any{
+			"agent.wait":   {"status": "completed"},
+			"chat.history": {"messages": []any{}},
+		},
+		events: make(chan gatewayEventFrame, 2),
+	}
+	adapter := adapterWithFake(fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := adapter.SubscribePlugin(ctx)
+	if err != nil {
+		t.Fatalf("SubscribePlugin: %v", err)
+	}
+	first := receivePluginEvent(t, events)
+	if first.Type != "desktop.session.directory.reconciled" {
+		t.Fatalf("initial event = %+v", first)
+	}
+
+	fake.events <- gatewayEventFrame{
+		Event: "agent",
+		Payload: map[string]any{
+			"sessionKey": "agent:main:prism:terminal-test",
+			"runId":      "run-terminal-test",
+			"data":       map[string]any{"phase": "start"},
+		},
+	}
+	started := receivePluginEvent(t, events)
+	if started.Type != "run.start" || started.ID != "run-terminal-test" {
+		t.Fatalf("started event = %+v", started)
+	}
+	terminal := receivePluginEvent(t, events)
+	if terminal.Type != "run.completed" || terminal.Status != "completed" || terminal.ID != "run-terminal-test:terminal" || nativeSessionID(terminal) != "agent:main:prism:terminal-test" {
+		t.Fatalf("terminal event = %+v", terminal)
+	}
+	if len(fake.calls) == 0 {
+		t.Fatal("expected Gateway RPC calls")
+	}
+	foundWait := false
+	for _, call := range fake.calls {
+		if call.method == "agent.wait" && call.params["runId"] == "run-terminal-test" {
+			foundWait = true
+		}
+	}
+	if !foundWait {
+		t.Fatalf("agent.wait was not called for run: %+v", fake.calls)
+	}
+}
+
 func TestOpenClawSessionHintsReadMillisecondTimestampsAndPreserveGatewayRows(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	hints := openClawSessionHints("ws://127.0.0.1:18789", map[string]any{"sessions": []any{

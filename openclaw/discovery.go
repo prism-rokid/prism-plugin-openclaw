@@ -11,10 +11,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	pluginbridge "github.com/Rokid-Prism/prism-plugin-sdk"
+	"github.com/google/uuid"
 )
 
 const defaultGatewayPort = 18789
@@ -543,8 +544,30 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 
 	out := make(chan pluginbridge.PluginEvent, 128)
 	go func() {
-		defer close(out)
+		watchCtx, stopWatchers := context.WithCancel(ctx)
+		var waiters sync.WaitGroup
+		defer func() {
+			stopWatchers()
+			waiters.Wait()
+			close(out)
+		}()
 		defer client.Close()
+		var runMu sync.Mutex
+		waitingRuns := map[string]bool{}
+		terminalRuns := map[string]bool{}
+		sendTerminalOnce := func(runID string, event pluginbridge.PluginEvent) {
+			if runID != "" {
+				runMu.Lock()
+				if terminalRuns[runID] {
+					runMu.Unlock()
+					return
+				}
+				terminalRuns[runID] = true
+				runMu.Unlock()
+				event.ID = runID + ":terminal"
+			}
+			sendPluginEvent(watchCtx, out, event)
+		}
 		if !sendPluginEvent(ctx, out, pluginbridge.PluginEvent{
 			ID:        "openclaw-directory-initial-" + uuid.NewString(),
 			Type:      "desktop.session.directory.reconciled",
@@ -597,6 +620,29 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 							if snap, snapErr := a.buildDetailSnapshotWithRun(ctx, client, session, run); snapErr == nil {
 								event = withDetailSnapshot(event, snap)
 							}
+							runID := firstNonEmpty(stringFromAny(frame.Payload["runId"]), stringFromAny(data["runId"]))
+							if event.Type == "run.completed" || event.Type == "run.failed" {
+								sendTerminalOnce(runID, event)
+								continue
+							}
+							phase := strings.ToLower(strings.TrimSpace(stringFromAny(data["phase"])))
+							if runID != "" && (phase == "start" || phase == "started" || phase == "running") {
+								runMu.Lock()
+								startWait := !waitingRuns[runID] && !terminalRuns[runID]
+								waitingRuns[runID] = true
+								runMu.Unlock()
+								if startWait {
+									waiters.Add(1)
+									go func(runID string, session pluginbridge.NativeSession) {
+										defer waiters.Done()
+										terminal, waitErr := a.WaitForRun(watchCtx, session, runID)
+										if waitErr == nil && (terminal.Type == "run.completed" || terminal.Type == "run.failed") {
+											terminal = attachNativeSession(terminal, session)
+											sendTerminalOnce(runID, terminal)
+										}
+									}(runID, session)
+								}
+							}
 						}
 					}
 				}
@@ -607,8 +653,13 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 				kind := strings.TrimSuffix(frame.Event, ".approval.resolved")
 				event, ok = approvalResolvedEvent(endpoint, kind, frame.Payload)
 			}
-			if ok && !sendPluginEvent(ctx, out, event) {
-				return
+			if ok {
+				if event.Type == "run.completed" || event.Type == "run.failed" {
+					runID := firstNonEmpty(stringFromAny(frame.Payload["runId"]), event.ID)
+					sendTerminalOnce(runID, event)
+				} else if !sendPluginEvent(ctx, out, event) {
+					return
+				}
 			}
 		}
 	}()
@@ -620,18 +671,7 @@ func (a *Adapter) WaitForRun(ctx context.Context, session pluginbridge.NativeSes
 	if runID == "" {
 		return pluginbridge.PluginEvent{}, fmt.Errorf("openclaw: run id required")
 	}
-	endpoint, _, err := a.discoverEndpoint()
-	if err != nil {
-		return pluginbridge.PluginEvent{}, err
-	}
-	token, _, err := a.discoverToken()
-	if err != nil {
-		return pluginbridge.PluginEvent{}, err
-	}
-	if token == "" {
-		return pluginbridge.PluginEvent{}, fmt.Errorf("openclaw: gateway token not found")
-	}
-	client, err := newGatewayClient(ctx, gatewayClientConfig{Endpoint: endpoint, Token: token})
+	client, err := a.dialClient(ctx)
 	if err != nil {
 		return pluginbridge.PluginEvent{}, err
 	}

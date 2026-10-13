@@ -233,6 +233,13 @@ func TestLocalGatewayConversationE2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	a := New(Config{GatewayURL: "http://127.0.0.1:18789"})
+	pluginEvents, err := a.SubscribePlugin(ctx)
+	if err != nil {
+		t.Fatalf("SubscribePlugin: %v", err)
+	}
+	if event := receivePluginEvent(t, pluginEvents); event.Type != "desktop.session.directory.reconciled" {
+		t.Fatalf("initial plugin event = %+v", event)
+	}
 
 	stamp := time.Now().UnixNano()
 	messageID := fmt.Sprintf("openclaw-conversation-e2e-%d", stamp)
@@ -270,6 +277,7 @@ func TestLocalGatewayConversationE2E(t *testing.T) {
 	if terminal.Type != "run.completed" && terminal.Type != "run.failed" {
 		t.Fatalf("unexpected terminal event: %+v", terminal)
 	}
+	assertPluginRunTerminal(t, pluginEvents, session.NativeSessionID)
 
 	historyCtx, stopHistory := context.WithCancel(ctx)
 	historyEvents, err := a.ReadHistoryStream(historyCtx, session, pluginbridge.HistoryStreamRequest{
@@ -328,6 +336,14 @@ liveHistoryObserved:
 	if err != nil || !visible.Visible {
 		t.Fatalf("second visibility=%+v err=%v", visible, err)
 	}
+	terminal, err = a.WaitForRun(ctx, session, second.NativeMessageID)
+	if err != nil {
+		t.Fatalf("WaitForRun after second Send: %v", err)
+	}
+	if terminal.Type != "run.completed" && terminal.Type != "run.failed" {
+		t.Fatalf("unexpected terminal event after second Send: %+v", terminal)
+	}
+	assertPluginRunTerminal(t, pluginEvents, session.NativeSessionID)
 
 	history, err := a.ReadHistory(ctx, session, 20)
 	if err != nil {
@@ -339,6 +355,25 @@ liveHistoryObserved:
 	}
 	if strings.Contains(rendered, attachmentPath) {
 		t.Fatalf("history leaked the materialized attachment path: %s", attachmentPath)
+	}
+}
+
+func assertPluginRunTerminal(t *testing.T, events <-chan pluginbridge.PluginEvent, sessionKey string) {
+	t.Helper()
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				t.Fatal("plugin-wide subscription closed before run terminal")
+			}
+			if nativeSessionID(event) == sessionKey && (event.Type == "run.completed" || event.Type == "run.failed") {
+				return
+			}
+		case <-deadline.C:
+			t.Fatalf("plugin-wide subscription did not publish a terminal event for %s", sessionKey)
+		}
 	}
 }
 
@@ -380,7 +415,7 @@ func receivePluginEventMatching(t *testing.T, events <-chan pluginbridge.PluginE
 
 func deleteE2ESession(t *testing.T, a *Adapter, sessionKey string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := a.dialClient(ctx)
 	if err != nil {

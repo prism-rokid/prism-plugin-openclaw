@@ -146,12 +146,12 @@ func runFromAgentEvent(data map[string]any) map[string]any {
 	summary := "当前会话空闲。"
 	primaryAction := "send"
 	switch phase {
-	case "started", "running":
+	case "start", "started", "running":
 		status = "running"
 		interruptible = true
 		summary = "OpenClaw 正在回复…"
 		primaryAction = "interrupt"
-	case "ended", "completed", "complete", "success":
+	case "end", "ended", "completed", "complete", "success":
 		status = "completed"
 		summary = "OpenClaw 已完成。"
 	case "failed", "error":
