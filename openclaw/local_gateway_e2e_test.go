@@ -140,7 +140,7 @@ func TestLocalGatewayPeerSyncE2E(t *testing.T) {
 	if os.Getenv("PRISM_OPENCLAW_E2E") != "1" {
 		t.Skip("set PRISM_OPENCLAW_E2E=1 with a local OpenClaw Gateway running")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	a := New(Config{GatewayURL: "http://127.0.0.1:18789"})
 
@@ -190,7 +190,19 @@ func TestLocalGatewayPeerSyncE2E(t *testing.T) {
 		t.Fatal("plugin watcher did not observe the peer user message")
 	}
 	if runID := stringFromAny(peerRun["runId"]); runID != "" {
-		_, _ = peer.Request(ctx, "chat.abort", map[string]any{"sessionKey": key, "runId": runID})
+		waitTimeout := 90 * time.Second
+		waitCtx, cancelWait := context.WithTimeout(ctx, waitTimeout)
+		waitResult, waitErr := peer.RequestWithTimeout(waitCtx, "agent.wait", map[string]any{
+			"runId": runID, "timeoutMs": int(waitTimeout / time.Millisecond),
+		}, waitTimeout+2*time.Second)
+		cancelWait()
+		if waitErr != nil {
+			t.Fatalf("peer agent.wait: %v", waitErr)
+		}
+		status := normalizeWaitStatus(stringFromMap(waitResult, "status"))
+		if status != "completed" && status != "failed" {
+			t.Fatalf("peer run did not reach terminal state: %+v", waitResult)
+		}
 	}
 
 	prismMarker := fmt.Sprintf("PRISM_OPENCLAW_PLUGIN_%d", stamp)
