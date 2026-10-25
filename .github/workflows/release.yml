@@ -29,9 +29,8 @@ jobs:
           - target: linux-x64
             runner: ubuntu-22.04
             runner_labels: 'null'
-    # USE_SELF_HOSTED (Actions variable): unset/true routes macos-arm64 and windows-x64
-    # builds to org self-hosted runners; 'false' keeps everything GitHub-hosted.
-    runs-on: ${{ vars.USE_SELF_HOSTED != 'false' && fromJSON(matrix.runner_labels) || matrix.runner }}
+    # Use hosted runners unless self-hosted runners are explicitly enabled.
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && fromJSON(matrix.runner_labels) || matrix.runner }}
     env:
       PRISM_PLATFORM: ${{ matrix.target }}
       GOPROXY: https://goproxy.cn,direct
@@ -90,10 +89,5 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        # A moved tag or a rerun must rebuild the release instead of failing
-        # on the stale one; the artifacts are regenerated either way.
-        run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release delete "$GITHUB_REF_NAME" --yes
-          fi
-          gh release create "$GITHUB_REF_NAME" release-artifacts/* --title "$GITHUB_REF_NAME" --generate-notes
+        # Published tags and assets are immutable; use a new version for changes.
+        run: gh release create "$GITHUB_REF_NAME" release-artifacts/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
