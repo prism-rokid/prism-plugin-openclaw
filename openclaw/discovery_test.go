@@ -28,6 +28,46 @@ func TestDiscoverEndpointIgnoresStoredSessionEndpointByUsingCurrentDiscovery(t *
 	}
 }
 
+func TestDiscoverEndpointFallsBackWithoutUserHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	t.Setenv("OPENCLAW_STATE_DIR", "")
+	t.Setenv("OPENCLAW_GATEWAY_PORT", "")
+	adapter := New(Config{})
+	endpoint, _, err := adapter.discoverEndpoint()
+	if err != nil || endpoint != "http://127.0.0.1:18789" {
+		t.Fatalf("discoverEndpoint = (%q, %v)", endpoint, err)
+	}
+	if _, _, err := adapter.discoverToken(); err == nil || !strings.Contains(err.Error(), "OPENCLAW_HOME") {
+		t.Fatalf("discoverToken should explain how to configure the missing home: %v", err)
+	}
+}
+
+func TestDiscoverUsesExplicitStateDirAndGatewayPort(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "openclaw.json"), []byte(`{"gateway":{"port":18888,"auth":{"token":"fixture"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_STATE_DIR", root)
+	t.Setenv("OPENCLAW_GATEWAY_PORT", "")
+	adapter := New(Config{})
+	endpoint, _, err := adapter.discoverEndpoint()
+	if err != nil || endpoint != "http://127.0.0.1:18888" {
+		t.Fatalf("discoverEndpoint = (%q, %v)", endpoint, err)
+	}
+	token, _, err := adapter.discoverToken()
+	if err != nil || token != "fixture" {
+		t.Fatalf("discoverToken = (%q, %v)", token, err)
+	}
+	t.Setenv("OPENCLAW_GATEWAY_PORT", "19999")
+	endpoint, _, err = adapter.discoverEndpoint()
+	if err != nil || endpoint != "http://127.0.0.1:19999" {
+		t.Fatalf("environment gateway port = (%q, %v)", endpoint, err)
+	}
+}
+
 func TestProbePreservesUnverifiedDiscoveryReason(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "test-token")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

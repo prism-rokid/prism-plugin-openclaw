@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,20 +124,31 @@ func unavailableDiscoveryReason(discovery pluginbridge.DiscoveryResult, availabl
 	return "openclaw gateway is not verified"
 }
 
+func discoveryFailureDetail(source, reason string) string {
+	if runtime.GOOS == "windows" {
+		return reason
+	}
+	return joinDetails(source, reason)
+}
+
 func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, error) {
 	endpoint, detail, err := a.discoverEndpoint()
 	if err != nil {
 		return pluginbridge.DiscoveryResult{PluginID: a.ID(), Surface: "gateway", Detail: detail}, err
 	}
 	healthOK := a.healthOK(ctx, endpoint)
-	token, tokenSource, _ := a.discoverToken()
+	token, tokenSource, tokenErr := a.discoverToken()
 	if token == "" {
+		reason := "未找到 OpenClaw Gateway Token；请检查配置文件或设置 OPENCLAW_GATEWAY_TOKEN。"
+		if tokenErr != nil {
+			reason = tokenErr.Error()
+		}
 		return pluginbridge.DiscoveryResult{
 			PluginID: a.ID(),
 			Surface:  "gateway",
 			Endpoint: endpoint,
 			Verified: false,
-			Detail:   joinDetails(detail, "gateway token not found"),
+			Detail:   discoveryFailureDetail(detail, reason),
 			SessionHints: map[string]string{
 				"health": boolString(healthOK),
 			},
@@ -147,12 +159,16 @@ func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, e
 		Token:    token,
 	})
 	if err != nil {
+		reason := "gateway rpc auth failed: " + err.Error()
+		if runtime.GOOS == "windows" {
+			reason = "无法连接 OpenClaw Gateway；请检查服务地址和 Token。"
+		}
 		return pluginbridge.DiscoveryResult{
 			PluginID: a.ID(),
 			Surface:  "gateway",
 			Endpoint: endpoint,
 			Verified: false,
-			Detail:   joinDetails(detail, "gateway rpc auth failed: "+err.Error()),
+			Detail:   discoveryFailureDetail(detail, reason),
 			SessionHints: map[string]string{
 				"health":      boolString(healthOK),
 				"tokenSource": tokenSource,
@@ -161,12 +177,16 @@ func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, e
 	}
 	defer client.Close()
 	if _, err := client.Request(ctx, "gateway.identity.get", map[string]any{}); err != nil {
+		reason := "gateway identity failed: " + err.Error()
+		if runtime.GOOS == "windows" {
+			reason = "OpenClaw Gateway 验证失败；请检查服务版本和 Token。"
+		}
 		return pluginbridge.DiscoveryResult{
 			PluginID: a.ID(),
 			Surface:  "gateway",
 			Endpoint: endpoint,
 			Verified: false,
-			Detail:   joinDetails(detail, "gateway identity failed: "+err.Error()),
+			Detail:   discoveryFailureDetail(detail, reason),
 			SessionHints: map[string]string{
 				"health":      boolString(healthOK),
 				"tokenSource": tokenSource,
@@ -190,9 +210,12 @@ func (a *Adapter) discoverEndpoint() (string, string, error) {
 	if url := strings.TrimSpace(a.Config.GatewayURL); url != "" && url != "auto" {
 		return strings.TrimRight(url, "/"), "configured gateway_url", nil
 	}
+	if port, err := strconv.Atoi(strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_PORT"))); err == nil && port > 0 && port <= 65535 {
+		return fmt.Sprintf("http://127.0.0.1:%d", port), "env OPENCLAW_GATEWAY_PORT", nil
+	}
 	root, err := openclawHome(a.Config.HomeDir)
 	if err != nil {
-		return "", "", err
+		return fmt.Sprintf("http://127.0.0.1:%d", defaultGatewayPort), "default openclaw gateway port", nil
 	}
 	if port := readGatewayPortFromConfig(filepath.Join(root, "openclaw.json")); port > 0 {
 		return fmt.Sprintf("http://127.0.0.1:%d", port), "openclaw.json gateway.port", nil
@@ -207,9 +230,12 @@ func openclawHome(override string) (string, error) {
 	if strings.TrimSpace(override) != "" {
 		return filepath.Clean(strings.TrimSpace(override)), nil
 	}
+	if stateDir := strings.TrimSpace(os.Getenv("OPENCLAW_STATE_DIR")); stateDir != "" {
+		return filepath.Clean(stateDir), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return "", fmt.Errorf("openclaw: user home unavailable")
+		return "", fmt.Errorf("找不到 OpenClaw 配置目录；请设置 OPENCLAW_HOME，或配置 Gateway 地址和 Token")
 	}
 	return filepath.Join(home, ".openclaw"), nil
 }

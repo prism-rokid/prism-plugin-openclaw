@@ -59,6 +59,11 @@ developers must run the build command above after changing Go source.
 
 For normal product usage, plugin install / remove goes through Prism Desktop, not the public CLI surface.
 
+Windows 配置：显式 `OPENCLAW_GATEWAY_URL` 优先，其次是 `OPENCLAW_GATEWAY_PORT`，
+最后从 `OPENCLAW_HOME`、`OPENCLAW_STATE_DIR` 或 `%USERPROFILE%\.openclaw` 读取端口。
+无法解析用户目录时仍尝试默认端口；此时需要 `OPENCLAW_GATEWAY_TOKEN`。
+`OPENCLAW_HOME` 和 `OPENCLAW_STATE_DIR` 均指向包含 `openclaw.json` 的目录。
+
 The package is intentionally independent from Prism Hub internals. It imports
 the public Go module `github.com/Prism-Rokid/prism-plugin-sdk`; forks should
 use that released module rather than a local `replace` directive.
