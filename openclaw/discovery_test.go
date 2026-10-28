@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,8 @@ func TestDiscoverEndpointFallsBackWithoutUserHome(t *testing.T) {
 	t.Setenv("HOMEDRIVE", "")
 	t.Setenv("HOMEPATH", "")
 	t.Setenv("OPENCLAW_STATE_DIR", "")
+	t.Setenv("OPENCLAW_HOME", "")
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
 	t.Setenv("OPENCLAW_GATEWAY_PORT", "")
 	adapter := New(Config{})
 	endpoint, _, err := adapter.discoverEndpoint()
@@ -79,8 +82,54 @@ func TestProbePreservesUnverifiedDiscoveryReason(t *testing.T) {
 	if capability.Available {
 		t.Fatalf("expected unavailable capability, got %+v", capability)
 	}
-	if !strings.Contains(capability.UnavailableReason, "gateway rpc auth failed") {
+	want := "gateway rpc auth failed"
+	if runtime.GOOS == "windows" {
+		want = "无法连接 OpenClaw Gateway"
+	}
+	if !strings.Contains(capability.UnavailableReason, want) {
 		t.Fatalf("expected diagnostic reason, got %q", capability.UnavailableReason)
+	}
+}
+
+func TestDiscoverUsesActiveJSON5ConfigPath(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(root, "custom config.json5")
+	if err := os.WriteFile(config, []byte("{ // OpenClaw supports JSON5\n gateway: {port: 19912, auth: {token: 'fixture-token'},},}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_CONFIG_PATH", config)
+	t.Setenv("OPENCLAW_GATEWAY_PORT", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	a := New(Config{})
+	endpoint, _, err := a.discoverEndpoint()
+	if err != nil || endpoint != "http://127.0.0.1:19912" {
+		t.Fatalf("endpoint = %q, err = %v", endpoint, err)
+	}
+	token, _, err := a.discoverToken()
+	if err != nil || token != "fixture-token" {
+		t.Fatalf("token discovery failed: %v", err)
+	}
+}
+
+func TestOpenClawHomeAndProfileMatchGatewayDefaults(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENCLAW_HOME", root)
+	t.Setenv("OPENCLAW_STATE_DIR", "")
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_PROFILE", "work")
+	got, err := openclawConfigPath("")
+	want := filepath.Join(root, ".openclaw-work", "openclaw.json")
+	if err != nil || got != want {
+		t.Fatalf("profile config = %q, want %q, err = %v", got, want, err)
+	}
+	t.Setenv("OPENCLAW_STATE_DIR", filepath.Join(root, "state"))
+	got, err = openclawConfigPath("")
+	if err != nil || got != filepath.Join(root, "state", "openclaw.json") {
+		t.Fatalf("state override config = %q, err = %v", got, err)
+	}
+	got, err = openclawConfigPath(filepath.Join(root, "explicit"))
+	if err != nil || got != filepath.Join(root, "explicit", "openclaw.json") {
+		t.Fatalf("explicit config = %q, err = %v", got, err)
 	}
 }
 
@@ -227,6 +276,27 @@ func TestSubscribePluginConfirmsTerminalRunWhenGatewayOmitsEndEvent(t *testing.T
 	}
 	if !foundWait {
 		t.Fatalf("agent.wait was not called for run: %+v", fake.calls)
+	}
+}
+
+func TestPluginWatcherUsesDirectoryThreadIDWhenEventOmitsIt(t *testing.T) {
+	key := "agent:main:dashboard:existing"
+	fake := &fakeRPCClient{responses: map[string]map[string]any{
+		"sessions.list": {"sessions": []any{map[string]any{"key": key, "sessionId": "native-thread"}}},
+	}, events: make(chan gatewayEventFrame, 1)}
+	a := adapterWithFake(fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := a.SubscribePlugin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = receivePluginEvent(t, events)
+	fake.events <- gatewayEventFrame{Event: "agent", Payload: map[string]any{"sessionKey": key, "data": map[string]any{"phase": "running"}}}
+	event := receivePluginEvent(t, events)
+	native, ok := event.Payload["native_session"].(map[string]any)
+	if !ok || native["native_thread_id"] != "native-thread" {
+		t.Fatalf("event lost directory identity: %+v", event.Payload)
 	}
 }
 

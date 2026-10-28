@@ -17,6 +17,7 @@ import (
 
 	pluginbridge "github.com/Rokid-Prism/prism-plugin-sdk"
 	"github.com/google/uuid"
+	"github.com/titanous/json5"
 )
 
 const defaultGatewayPort = 18789
@@ -28,8 +29,10 @@ const openClawSessionPageLimit = 200
 const maxGatewayAttachmentBytes int64 = 20 * 1024 * 1024
 
 type Adapter struct {
-	Config Config
-	dial   dialer
+	Config  Config
+	dial    dialer
+	draftMu sync.Mutex
+	drafts  map[string]draftState
 }
 
 type Config struct {
@@ -99,6 +102,7 @@ func (a *Adapter) Probe(ctx context.Context) (pluginbridge.Capability, error) {
 		NativeVisibleOutput:        discovery.Endpoint != "" && discovery.Verified,
 		CanAttachSession:           true,
 		CanStartSessionWithMessage: true,
+		CanOpenDraft:               true,
 		CanListSessions:            true,
 		CanReadHistory:             true,
 		CanInterrupt:               true,
@@ -213,14 +217,14 @@ func (a *Adapter) discoverEndpoint() (string, string, error) {
 	if port, err := strconv.Atoi(strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_PORT"))); err == nil && port > 0 && port <= 65535 {
 		return fmt.Sprintf("http://127.0.0.1:%d", port), "env OPENCLAW_GATEWAY_PORT", nil
 	}
-	root, err := openclawHome(a.Config.HomeDir)
+	configPath, err := openclawConfigPath(a.Config.HomeDir)
 	if err != nil {
 		return fmt.Sprintf("http://127.0.0.1:%d", defaultGatewayPort), "default openclaw gateway port", nil
 	}
-	if port := readGatewayPortFromConfig(filepath.Join(root, "openclaw.json")); port > 0 {
+	if port := readGatewayPortFromConfig(configPath); port > 0 && port <= 65535 {
 		return fmt.Sprintf("http://127.0.0.1:%d", port), "openclaw.json gateway.port", nil
 	}
-	if port := readGatewayPortFromEnv(filepath.Join(root, "service-env", "ai.openclaw.env")); port > 0 {
+	if port := readGatewayPortFromEnv(filepath.Join(filepath.Dir(configPath), "service-env", "ai.openclaw.env")); port > 0 && port <= 65535 {
 		return fmt.Sprintf("http://127.0.0.1:%d", port), "service-env OPENCLAW_GATEWAY_PORT", nil
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", defaultGatewayPort), "default openclaw gateway port", nil
@@ -233,11 +237,35 @@ func openclawHome(override string) (string, error) {
 	if stateDir := strings.TrimSpace(os.Getenv("OPENCLAW_STATE_DIR")); stateDir != "" {
 		return filepath.Clean(stateDir), nil
 	}
+	if home := strings.TrimSpace(os.Getenv("OPENCLAW_HOME")); home != "" {
+		return filepath.Join(home, openclawStateName()), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return "", fmt.Errorf("找不到 OpenClaw 配置目录；请设置 OPENCLAW_HOME，或配置 Gateway 地址和 Token")
 	}
-	return filepath.Join(home, ".openclaw"), nil
+	return filepath.Join(home, openclawStateName()), nil
+}
+
+func openclawStateName() string {
+	if profile := strings.TrimSpace(os.Getenv("OPENCLAW_PROFILE")); profile != "" && profile != "default" {
+		return ".openclaw-" + profile
+	}
+	return ".openclaw"
+}
+
+func openclawConfigPath(override string) (string, error) {
+	// --home remains an explicit state-directory override for existing Hub setups.
+	if strings.TrimSpace(override) == "" {
+		if path := strings.TrimSpace(os.Getenv("OPENCLAW_CONFIG_PATH")); path != "" {
+			return filepath.Clean(path), nil
+		}
+	}
+	root, err := openclawHome(override)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "openclaw.json"), nil
 }
 
 func readGatewayPortFromConfig(path string) int {
@@ -270,10 +298,15 @@ func readGatewayPortFromEnv(path string) int {
 // gateway receives the stable first-message id both in its new session key and
 // as the chat idempotency key, so a retry returns to the same native session.
 func (a *Adapter) StartSessionWithMessage(ctx context.Context, req pluginbridge.StartSessionWithMessageRequest) (pluginbridge.StartSessionWithMessageResult, error) {
+	return a.startSessionWithOptions(ctx, req, nil)
+}
+
+func (a *Adapter) startSessionWithOptions(ctx context.Context, req pluginbridge.StartSessionWithMessageRequest, options map[string]any) (pluginbridge.StartSessionWithMessageResult, error) {
 	messageID := strings.TrimSpace(req.Message.PrismMessageID)
 	if messageID == "" || (strings.TrimSpace(req.Message.Text) == "" && len(req.Message.Attachments) == 0) {
 		return pluginbridge.StartSessionWithMessageResult{}, fmt.Errorf("openclaw: first message id and content required")
 	}
+	req.Cwd = a.sessionCwd("agent:main:main", req.Cwd)
 	endpoint, _, err := a.discoverEndpoint()
 	if err != nil {
 		return pluginbridge.StartSessionWithMessageResult{}, err
@@ -302,6 +335,11 @@ func (a *Adapter) StartSessionWithMessage(ctx context.Context, req pluginbridge.
 	payload, err := client.Request(ctx, "sessions.create", createParams)
 	if err != nil {
 		return pluginbridge.StartSessionWithMessageResult{}, err
+	}
+	if len(options) > 0 {
+		if err := a.patchSession(ctx, client, firstNonEmpty(stringFromMap(payload, "key"), sessionKey), options); err != nil {
+			return pluginbridge.StartSessionWithMessageResult{}, err
+		}
 	}
 	session := pluginbridge.NativeSession{
 		PluginID:        a.ID(),
@@ -342,7 +380,7 @@ func (a *Adapter) AttachSession(ctx context.Context, req pluginbridge.AttachSess
 		NativeThreadID:  strings.TrimSpace(req.NativeThreadID),
 		Surface:         "gateway",
 		Endpoint:        endpoint,
-		Cwd:             req.Cwd,
+		Cwd:             a.sessionCwd(nativeSessionID, req.Cwd),
 		Visible:         true,
 	}, nil
 }
@@ -364,7 +402,11 @@ func (a *Adapter) ListSessions(ctx context.Context) ([]pluginbridge.NativeSessio
 		return nil, err
 	}
 	defer client.Close()
-	return listSessionsWithClient(ctx, endpoint, client)
+	hints, err := listSessionsWithClient(ctx, endpoint, client)
+	for i := range hints {
+		hints[i].Cwd = a.sessionCwd(hints[i].NativeSessionID, hints[i].Cwd)
+	}
+	return hints, err
 }
 
 func listSessionsWithClient(ctx context.Context, endpoint string, client rpcClient) ([]pluginbridge.NativeSessionHint, error) {
@@ -581,6 +623,43 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 		var runMu sync.Mutex
 		waitingRuns := map[string]bool{}
 		terminalRuns := map[string]bool{}
+		// Gateway event frames do not consistently include sessionId. Seed the
+		// thread identities from the same directory used by ListSessions so an
+		// event for an existing session cannot create a second Hub conversation.
+		threadIDs := map[string]string{}
+		var threadMu sync.Mutex
+		if initial, err := listSessionsWithClient(ctx, endpoint, client); err == nil {
+			for _, hint := range initial {
+				if hint.NativeSessionID != "" && hint.NativeThreadID != "" {
+					threadIDs[hint.NativeSessionID] = hint.NativeThreadID
+				}
+			}
+		}
+		enrichThread := func(event pluginbridge.PluginEvent) pluginbridge.PluginEvent {
+			native, _ := event.Payload["native_session"].(map[string]any)
+			key := stringFromAny(native["native_session_id"])
+			if key == "" {
+				return event
+			}
+			thread := stringFromAny(native["native_thread_id"])
+			threadMu.Lock()
+			if thread != "" {
+				if len(threadIDs) >= 4096 {
+					clear(threadIDs)
+				}
+				threadIDs[key] = thread
+			} else {
+				thread = threadIDs[key]
+			}
+			threadMu.Unlock()
+			if thread != "" {
+				native["native_thread_id"] = thread
+				if hint, ok := event.Payload["session_hint"].(map[string]any); ok && stringFromAny(hint["native_thread_id"]) == "" {
+					hint["native_thread_id"] = thread
+				}
+			}
+			return event
+		}
 		sendTerminalOnce := func(runID string, event pluginbridge.PluginEvent) {
 			if runID != "" {
 				runMu.Lock()
@@ -592,7 +671,7 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 				runMu.Unlock()
 				event.ID = runID + ":terminal"
 			}
-			sendPluginEvent(watchCtx, out, event)
+			sendPluginEvent(watchCtx, out, enrichThread(event))
 		}
 		if !sendPluginEvent(ctx, out, pluginbridge.PluginEvent{
 			ID:        "openclaw-directory-initial-" + uuid.NewString(),
@@ -632,14 +711,28 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 			switch frame.Event {
 			case "sessions.changed":
 				event, ok = sessionIndexEvent(endpoint, frame)
+				if ok {
+					event = a.withWorkspaceCwd(event)
+				}
 			case "session.message", "agent":
 				event, ok = convertGatewayEvent("", frame)
 				if ok {
 					session := nativeSessionForGatewayEvent(endpoint, frame)
+					session.Cwd = a.sessionCwd(session.NativeSessionID, session.Cwd)
+					if session.NativeSessionID != "" && session.NativeThreadID == "" {
+						threadMu.Lock()
+						session.NativeThreadID = threadIDs[session.NativeSessionID]
+						threadMu.Unlock()
+						if session.NativeThreadID == "" {
+							if row, err := a.sessionDescribe(ctx, client, session.NativeSessionID); err == nil {
+								session.NativeThreadID = stringFromAny(row["sessionId"])
+							}
+						}
+					}
 					if session.NativeSessionID == "" {
 						ok = false
 					} else {
-						event = attachNativeSession(event, session)
+						event = enrichThread(attachNativeSession(event, session))
 						if frame.Event == "agent" {
 							data, _ := frame.Payload["data"].(map[string]any)
 							run := runFromAgentEvent(data)
@@ -683,7 +776,7 @@ func (a *Adapter) SubscribePlugin(ctx context.Context) (<-chan pluginbridge.Plug
 				if event.Type == "run.completed" || event.Type == "run.failed" {
 					runID := firstNonEmpty(stringFromAny(frame.Payload["runId"]), event.ID)
 					sendTerminalOnce(runID, event)
-				} else if !sendPluginEvent(ctx, out, event) {
+				} else if !sendPluginEvent(ctx, out, enrichThread(event)) {
 					return
 				}
 			}
@@ -968,11 +1061,11 @@ func (a *Adapter) discoverToken() (string, string, error) {
 	if token := strings.TrimSpace(a.Config.GatewayToken); token != "" {
 		return token, "configured gateway token", nil
 	}
-	root, err := openclawHome(a.Config.HomeDir)
+	configPath, err := openclawConfigPath(a.Config.HomeDir)
 	if err != nil {
 		return "", "", err
 	}
-	token := readGatewayTokenFromConfig(filepath.Join(root, "openclaw.json"))
+	token := readGatewayTokenFromConfig(configPath)
 	if token != "" {
 		return token, "openclaw.json gateway.auth.token", nil
 	}
@@ -980,6 +1073,20 @@ func (a *Adapter) discoverToken() (string, string, error) {
 }
 
 type openClawState struct {
+	Agents struct {
+		Defaults struct {
+			Workspace string `json:"workspace"`
+		} `json:"defaults"`
+		List []struct {
+			ID        string `json:"id"`
+			Workspace string `json:"workspace"`
+			Default   bool   `json:"default"`
+		} `json:"list"`
+		Entries map[string]struct {
+			Workspace string `json:"workspace"`
+			Default   bool   `json:"default"`
+		} `json:"entries"`
+	} `json:"agents"`
 	Gateway struct {
 		Port int `json:"port"`
 		Auth struct {
@@ -994,7 +1101,7 @@ func readOpenClawState(path string) (openClawState, error) {
 	if err != nil {
 		return raw, err
 	}
-	if err := json.Unmarshal(b, &raw); err != nil {
+	if err := json5.Unmarshal(b, &raw); err != nil {
 		return raw, err
 	}
 	return raw, nil
@@ -1156,7 +1263,7 @@ func openClawSessionHint(endpoint string, m map[string]any) (pluginbridge.Native
 		NativeThreadID:      stringFromAny(m["sessionId"]),
 		Surface:             "gateway",
 		Endpoint:            endpoint,
-		Cwd:                 firstNonEmpty(stringFromAny(m["cwd"]), stringFromAny(m["spawnedCwd"]), stringFromAny(m["execCwd"])),
+		Cwd:                 firstNonEmpty(stringFromAny(m["cwd"]), stringFromAny(m["spawnedCwd"]), stringFromAny(m["execCwd"]), stringFromAny(m["workspaceDir"]), stringFromAny(m["workspace"])),
 		Title:               openClawSessionTitle(key, m),
 		PrismConversationID: prismConversationID,
 		Active:              active,

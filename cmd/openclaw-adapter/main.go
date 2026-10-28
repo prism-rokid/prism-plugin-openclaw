@@ -7,15 +7,15 @@ import (
 	"fmt"
 	"os"
 
-	pluginbridge "github.com/Rokid-Prism/prism-plugin-sdk"
 	"github.com/Rokid-Prism/prism-plugin-openclaw/openclaw"
+	pluginbridge "github.com/Rokid-Prism/prism-plugin-sdk"
 )
 
 func main() {
 	fs := flag.NewFlagSet("openclaw-adapter", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	gatewayURL := fs.String("gateway-url", envOr("OPENCLAW_GATEWAY_URL", "auto"), "OpenClaw Gateway URL or auto")
-	homeDir := fs.String("home", envOr("OPENCLAW_HOME", ""), "OpenClaw home dir")
+	homeDir := fs.String("home", "", "OpenClaw state directory override (otherwise use OpenClaw environment defaults)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)

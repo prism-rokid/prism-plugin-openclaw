@@ -60,9 +60,19 @@ developers must run the build command above after changing Go source.
 For normal product usage, plugin install / remove goes through Prism Desktop, not the public CLI surface.
 
 Windows 配置：显式 `OPENCLAW_GATEWAY_URL` 优先，其次是 `OPENCLAW_GATEWAY_PORT`，
-最后从 `OPENCLAW_HOME`、`OPENCLAW_STATE_DIR` 或 `%USERPROFILE%\.openclaw` 读取端口。
+最后从当前 OpenClaw 配置读取端口（支持 JSON5）。`OPENCLAW_CONFIG_PATH` 指定配置文件，
+`OPENCLAW_STATE_DIR` 指定状态目录；否则使用 `OPENCLAW_HOME` 或系统用户目录下的
+`.openclaw`，设置 `OPENCLAW_PROFILE` 时使用 `.openclaw-<profile>`。
 无法解析用户目录时仍尝试默认端口；此时需要 `OPENCLAW_GATEWAY_TOKEN`。
-`OPENCLAW_HOME` 和 `OPENCLAW_STATE_DIR` 均指向包含 `openclaw.json` 的目录。
+`--home` 仍可显式指定包含 `openclaw.json` 的状态目录。
+模型和 MiniMax 等供应商凭据由 OpenClaw Gateway 配置；此插件读取 Gateway 的模型列表，
+不把供应商 API key 当作 `OPENCLAW_GATEWAY_TOKEN`（后者是本地 Gateway 的连接凭据）。
+
+隔离验证可运行 `PRISM_OPENCLAW_MESSAGE_E2E=1 go test ./openclaw -run '^TestLocalGatewayMinimalMessageE2E$' -v`，
+通过环境传入 `OPENCLAW_GATEWAY_URL` 和 `OPENCLAW_GATEWAY_TOKEN`。该用例只发送一条最小消息，
+并要求原生历史中出现模型的 assistant 回复。Windows 已准备隔离安装与配置时，可在包含
+`MINIMAX_API_KEY` 的 PowerShell 会话中点源 `scripts/start-local-validation.ps1`，再从同一会话
+启动 Hub；脚本生成的 Gateway token 只保留在进程环境，不写入配置。
 
 The package is intentionally independent from Prism Hub internals. It imports
 the public Go module `github.com/Prism-Rokid/prism-plugin-sdk`; forks should

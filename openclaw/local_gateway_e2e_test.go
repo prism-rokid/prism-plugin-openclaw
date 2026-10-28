@@ -13,6 +13,75 @@ import (
 	pluginbridge "github.com/Rokid-Prism/prism-plugin-sdk"
 )
 
+// A single model request for validating a freshly installed, isolated Gateway.
+func TestLocalGatewayMinimalMessageE2E(t *testing.T) {
+	if os.Getenv("PRISM_OPENCLAW_MESSAGE_E2E") != "1" {
+		t.Skip("set PRISM_OPENCLAW_MESSAGE_E2E=1 with an authenticated Gateway and model configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	a := New(Config{GatewayURL: os.Getenv("OPENCLAW_GATEWAY_URL")})
+	capability, err := a.Probe(ctx)
+	if err != nil || !capability.Available {
+		t.Fatalf("gateway unavailable: %s (%v)", capability.UnavailableReason, err)
+	}
+	marker := "PRISM_GATEWAY_OK"
+	firstMessage := pluginbridge.InboundMessage{
+		PrismMessageID: fmt.Sprintf("minimal-e2e-%d", time.Now().UnixNano()),
+		Text:           "Reply with exactly " + marker + ". Do not use tools.",
+		Timestamp:      time.Now().UTC(),
+	}
+	if os.Getenv("PRISM_OPENCLAW_E2E_ZH") == "1" {
+		firstMessage.Text = "只回复 " + marker + "，不要使用工具。"
+	}
+	var started pluginbridge.StartSessionWithMessageResult
+	if os.Getenv("PRISM_OPENCLAW_DRAFT_E2E") == "1" {
+		draftID := "draft-" + firstMessage.PrismMessageID
+		opened, openErr := a.OpenDraft(ctx, pluginbridge.DraftOpenRequest{DraftID: draftID, PluginID: "openclaw"})
+		if openErr != nil || opened.DraftID != draftID {
+			t.Fatalf("open draft: %v", openErr)
+		}
+		if _, controlErr := a.ControlDraft(ctx, pluginbridge.DraftControlRequest{DraftID: draftID, Action: "controls.describe"}); controlErr != nil {
+			t.Fatal(controlErr)
+		}
+		started, err = a.StartDraftWithMessage(ctx, pluginbridge.StartDraftWithMessageRequest{DraftID: draftID, PluginID: "openclaw", Message: firstMessage})
+		if err == nil {
+			if _, retryErr := a.StartDraftWithMessage(ctx, pluginbridge.StartDraftWithMessageRequest{DraftID: draftID, Message: firstMessage}); retryErr == nil || !strings.Contains(retryErr.Error(), "draft_stale") {
+				t.Fatalf("consumed draft retry: %v", retryErr)
+			}
+		}
+	} else {
+		started, err = a.StartSessionWithMessage(ctx, pluginbridge.StartSessionWithMessageRequest{
+			PluginID: "openclaw",
+			Message:  firstMessage,
+		})
+	}
+	if err != nil {
+		t.Fatalf("start message: %v", err)
+	}
+	defer deleteE2ESession(t, a, started.Session.NativeSessionID)
+	terminal, err := a.WaitForRun(ctx, started.Session, started.Receipt.NativeMessageID)
+	if err != nil || terminal.Type != "run.completed" {
+		t.Fatalf("model did not complete: type=%s summary=%s err=%v", terminal.Type, terminal.Summary, err)
+	}
+	client, err := a.dialClient(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	history, err := client.Request(ctx, "chat.history", chatHistoryParams(started.Session.NativeSessionID, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range firstArray(history, "messages") {
+		message, _ := raw.(map[string]any)
+		if stringFromAny(message["role"]) == "assistant" && strings.Contains(flattenText(message["content"]), marker) {
+			return
+		}
+	}
+	t.Fatal("completed model run has no expected assistant reply in native history")
+}
+
 func TestLocalGatewayE2E(t *testing.T) {
 	if os.Getenv("PRISM_OPENCLAW_E2E") != "1" {
 		t.Skip("set PRISM_OPENCLAW_E2E=1 with a local OpenClaw Gateway running")

@@ -69,6 +69,9 @@ func (a *Adapter) buildDetailSnapshotWithRun(ctx context.Context, client rpcClie
 	if err == nil && row != nil {
 		applySessionRow(snap, row)
 	}
+	if cwd := a.sessionCwd(sessionKey, firstNonEmpty(stringFromAny(snap["cwd"]), session.Cwd)); cwd != "" {
+		snap["cwd"] = cwd
+	}
 
 	// 2) Model catalog -> model_options (field is `name` on each entry).
 	if models, err := a.modelsList(ctx, client, ""); err == nil {
