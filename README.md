@@ -8,6 +8,10 @@ letting Hub install the packaged version into
 The plugin speaks Prism Hub's JSON-over-stdio PluginBridge protocol on one side
 and OpenClaw Gateway WebSocket RPC on the other side.
 
+## 本地问题分析与贡献
+
+仓库默认带有 [`prism-plugin-maintainer`](.agents/skills/prism-plugin-maintainer/SKILL.md)，用于本地分析、修复和验证插件问题，无法解决时整理脱敏 Issue 草稿。支持 `.agents/skills` 的智能体可发现它，其他客户端可要求智能体直接阅读该文件。默认不发布；先准备 diff、检查结果、目标和正文供审阅，用户可一次授权 commit、推送与 PR 整条流程，或明确授权无法解决时自动提交 Issue。范围内已有授权不重复询问。公开提交和数据处理说明见 [SDK README](https://github.com/Rokid-Prism/prism-plugin-sdk#本地问题分析与贡献-skill)。
+
 Its Prism runtime mode is `native`. `gateway` is only the underlying OpenClaw
 transport and is not exposed as a user-selectable Prism runtime.
 
