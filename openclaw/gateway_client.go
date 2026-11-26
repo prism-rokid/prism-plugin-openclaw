@@ -3,9 +3,12 @@ package openclaw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +90,11 @@ type gatewayEventFrame struct {
 	Seq     int            `json:"seq,omitempty"`
 }
 
+var (
+	errGatewayDial      = errors.New("Gateway WebSocket 连接失败")
+	errGatewayHandshake = errors.New("Gateway 握手失败")
+)
+
 func newGatewayClient(ctx context.Context, cfg gatewayClientConfig) (*gatewayClient, error) {
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
@@ -110,7 +118,7 @@ func newGatewayClient(ctx context.Context, cfg gatewayClientConfig) (*gatewayCli
 		if resp != nil {
 			status = " (" + resp.Status + ")"
 		}
-		return nil, fmt.Errorf("openclaw gateway websocket dial failed%s: %w", status, err)
+		return nil, fmt.Errorf("openclaw gateway websocket dial failed%s: %w: %w", status, errGatewayDial, err)
 	}
 	client := &gatewayClient{
 		conn:        conn,
@@ -120,13 +128,13 @@ func newGatewayClient(ctx context.Context, cfg gatewayClientConfig) (*gatewayCli
 	}
 	if err := client.waitConnectChallenge(ctx); err != nil {
 		_ = client.Close()
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errGatewayHandshake, err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	go client.readLoop()
 	if _, err := client.Request(ctx, "connect", connectParams(token)); err != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("openclaw gateway connect failed: %w", err)
+		return nil, fmt.Errorf("openclaw gateway connect failed: %w: %w", errGatewayHandshake, err)
 	}
 	return client, nil
 }
@@ -402,17 +410,25 @@ func connectParams(token string) map[string]any {
 }
 
 func websocketURL(endpoint string) (string, error) {
-	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
-	switch {
-	case strings.HasPrefix(endpoint, "ws://"), strings.HasPrefix(endpoint, "wss://"):
-		return endpoint, nil
-	case strings.HasPrefix(endpoint, "http://"):
-		return "ws://" + strings.TrimPrefix(endpoint, "http://"), nil
-	case strings.HasPrefix(endpoint, "https://"):
-		return "wss://" + strings.TrimPrefix(endpoint, "https://"), nil
-	default:
-		return "", fmt.Errorf("openclaw gateway endpoint must be http(s) or ws(s): %s", endpoint)
+	address, err := url.Parse(strings.TrimRight(strings.TrimSpace(endpoint), "/"))
+	if err != nil || address.Hostname() == "" || address.User != nil || address.Fragment != "" {
+		return "", errors.New("OpenClaw Gateway 地址格式无效")
 	}
+	if value := address.Port(); value != "" {
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return "", errors.New("OpenClaw Gateway 端口无效")
+		}
+	}
+	switch address.Scheme {
+	case "http", "ws":
+		address.Scheme = "ws"
+	case "https", "wss":
+		address.Scheme = "wss"
+	default:
+		return "", errors.New("OpenClaw Gateway 地址需要使用 HTTP 或 WebSocket")
+	}
+	return address.String(), nil
 }
 
 func gatewayError(method string, errShape *gatewayResponseError) error {

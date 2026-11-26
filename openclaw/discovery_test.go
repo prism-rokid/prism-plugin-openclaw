@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +70,7 @@ func TestDiscoverUsesExplicitStateDirAndGatewayPort(t *testing.T) {
 	}
 }
 
-func TestProbePreservesUnverifiedDiscoveryReason(t *testing.T) {
+func TestProbeUsesSafeUnverifiedDiscoveryReason(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "test-token")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -82,12 +81,11 @@ func TestProbePreservesUnverifiedDiscoveryReason(t *testing.T) {
 	if capability.Available {
 		t.Fatalf("expected unavailable capability, got %+v", capability)
 	}
-	want := "gateway rpc auth failed"
-	if runtime.GOOS == "windows" {
-		want = "无法连接 OpenClaw Gateway"
+	if !strings.Contains(capability.UnavailableReason, "无法连接 OpenClaw Gateway") || strings.Contains(capability.UnavailableReason, "127.0.0.1") {
+		t.Fatalf("意外的兼容说明 %q", capability.UnavailableReason)
 	}
-	if !strings.Contains(capability.UnavailableReason, want) {
-		t.Fatalf("expected diagnostic reason, got %q", capability.UnavailableReason)
+	if d := capability.Diagnostics; d == nil || d.Code != "control_channel_unreachable" || d.Facts["transport_reachable"] != false {
+		t.Fatalf("意外的诊断结果 %#v", d)
 	}
 }
 
@@ -382,5 +380,26 @@ func TestListSessionsRejectsBrokenPagination(t *testing.T) {
 	_, err := listSessionsWithClient(context.Background(), "ws://127.0.0.1:18789", fake)
 	if err == nil || !strings.Contains(err.Error(), "invalid nextOffset") {
 		t.Fatalf("expected invalid pagination error, got %v", err)
+	}
+}
+
+func TestProbeDistinguishesInvalidGatewayConfiguration(t *testing.T) {
+	for _, address := range []string{
+		"http://127.0.0.1:invalid",
+		"http://127.0.0.1:70000",
+		"http:///gateway",
+		"http://user:fixture-secret@127.0.0.1:1",
+	} {
+		capability, err := New(Config{GatewayURL: address, GatewayToken: "fixture-secret"}).Probe(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := capability.Diagnostics
+		if d == nil || d.Code != "service_configuration_invalid" || len(d.Actions) != 1 || d.Actions[0] != "recheck" {
+			t.Fatalf("意外的诊断结果 %#v", d)
+		}
+		if strings.Contains(capability.UnavailableReason+d.Detail, "fixture-secret") {
+			t.Fatal("诊断泄漏凭据")
+		}
 	}
 }

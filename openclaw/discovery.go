@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -75,14 +76,18 @@ func (a *Adapter) dialClient(ctx context.Context) (rpcClient, error) {
 func (a *Adapter) ID() string { return "openclaw" }
 
 func (a *Adapter) Probe(ctx context.Context) (pluginbridge.Capability, error) {
-	discovery, err := a.Discover(ctx)
+	diagnostics := &pluginbridge.Diagnostic{
+		Component: "OpenClaw Gateway", Facts: map[string]any{"transport": "websocket"},
+	}
+	discovery, err := a.discover(ctx, diagnostics)
 	if err != nil {
 		return pluginbridge.Capability{
 			PluginID:           a.ID(),
 			Available:          false,
 			IntegrationMode:    pluginbridge.IntegrationModeProtocolNative,
 			VisibilitySurface:  "gateway",
-			UnavailableReason:  err.Error(),
+			UnavailableReason:  diagnostics.Summary,
+			Diagnostics:        diagnostics,
 			NativeVisibleInput: false,
 			CanListSessions:    true,
 			CanReadHistory:     true,
@@ -114,18 +119,29 @@ func (a *Adapter) Probe(ctx context.Context) (pluginbridge.Capability, error) {
 		CanReadStatus:              true, // adapter implements StatusReader
 		CanControlSession:          true, // adapter implements SessionController
 		VisibilitySurface:          "gateway",
-		UnavailableReason:          unavailableDiscoveryReason(discovery, available),
+		UnavailableReason:          probeUnavailableReason(diagnostics),
+		Diagnostics:                diagnostics,
 	}, nil
 }
 
-func unavailableDiscoveryReason(discovery pluginbridge.DiscoveryResult, available bool) string {
-	if available {
+func probeUnavailableReason(diagnostic *pluginbridge.Diagnostic) string {
+	if diagnostic.State == "ready" {
 		return ""
 	}
-	if detail := strings.TrimSpace(discovery.Detail); detail != "" {
-		return detail
+	return diagnostic.Summary
+}
+
+func gatewayDiagnostic(d *pluginbridge.Diagnostic, code, summary, detail string, reachable *bool, actions ...string) {
+	if d == nil {
+		return
 	}
-	return "openclaw gateway is not verified"
+	d.State, d.Code, d.Summary, d.Detail, d.Actions = "unavailable", code, summary, detail, actions
+	if code == "ready" {
+		d.State = "ready"
+	}
+	if reachable != nil {
+		d.Facts["transport_reachable"] = *reachable
+	}
 }
 
 func discoveryFailureDetail(source, reason string) string {
@@ -136,13 +152,24 @@ func discoveryFailureDetail(source, reason string) string {
 }
 
 func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, error) {
+	return a.discover(ctx, nil)
+}
+
+func (a *Adapter) discover(ctx context.Context, diagnostic *pluginbridge.Diagnostic) (pluginbridge.DiscoveryResult, error) {
+	reachable, unreachable := true, false
 	endpoint, detail, err := a.discoverEndpoint()
 	if err != nil {
+		gatewayDiagnostic(diagnostic, "service_configuration_invalid", "OpenClaw Gateway 配置无法读取", "", nil, "recheck")
 		return pluginbridge.DiscoveryResult{PluginID: a.ID(), Surface: "gateway", Detail: detail}, err
+	}
+	if _, err := websocketURL(endpoint); err != nil {
+		gatewayDiagnostic(diagnostic, "service_configuration_invalid", "OpenClaw Gateway 地址无效", "请检查地址格式和端口。", nil, "recheck")
+		return pluginbridge.DiscoveryResult{PluginID: a.ID(), Surface: "gateway", Endpoint: endpoint, Detail: err.Error()}, nil
 	}
 	healthOK := a.healthOK(ctx, endpoint)
 	token, tokenSource, tokenErr := a.discoverToken()
 	if token == "" {
+		gatewayDiagnostic(diagnostic, "authentication_required", "缺少 OpenClaw Gateway Token", "请检查 Gateway 的访问凭据配置。", nil, "recheck")
 		reason := "未找到 OpenClaw Gateway Token；请检查配置文件或设置 OPENCLAW_GATEWAY_TOKEN。"
 		if tokenErr != nil {
 			reason = tokenErr.Error()
@@ -163,6 +190,14 @@ func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, e
 		Token:    token,
 	})
 	if err != nil {
+		switch {
+		case errors.Is(err, errGatewayDial):
+			gatewayDiagnostic(diagnostic, "control_channel_unreachable", "无法连接 OpenClaw Gateway", "WebSocket 连接未建立。", &unreachable, "managed_relaunch", "recheck")
+		case errors.Is(err, errGatewayHandshake):
+			gatewayDiagnostic(diagnostic, "gateway_handshake_failed", "OpenClaw Gateway 握手失败", "WebSocket 已连接，请检查 Gateway 凭据和协议版本。", &reachable, "recheck")
+		default:
+			gatewayDiagnostic(diagnostic, "service_configuration_invalid", "OpenClaw Gateway 地址无效", "", nil, "recheck")
+		}
 		reason := "gateway rpc auth failed: " + err.Error()
 		if runtime.GOOS == "windows" {
 			reason = "无法连接 OpenClaw Gateway；请检查服务地址和 Token。"
@@ -181,6 +216,7 @@ func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, e
 	}
 	defer client.Close()
 	if _, err := client.Request(ctx, "gateway.identity.get", map[string]any{}); err != nil {
+		gatewayDiagnostic(diagnostic, "gateway_identity_failed", "OpenClaw Gateway 身份验证失败", "握手已完成，但 Gateway 未返回可用的身份响应。", &reachable, "recheck")
 		reason := "gateway identity failed: " + err.Error()
 		if runtime.GOOS == "windows" {
 			reason = "OpenClaw Gateway 验证失败；请检查服务版本和 Token。"
@@ -197,6 +233,7 @@ func (a *Adapter) Discover(ctx context.Context) (pluginbridge.DiscoveryResult, e
 			},
 		}, nil
 	}
+	gatewayDiagnostic(diagnostic, "ready", "OpenClaw 已连接", "", &reachable)
 	return pluginbridge.DiscoveryResult{
 		PluginID: a.ID(),
 		Surface:  "gateway",

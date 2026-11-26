@@ -9,3 +9,5 @@ require (
 )
 
 require github.com/titanous/json5 v1.0.0
+
+replace github.com/Rokid-Prism/prism-plugin-sdk => ./third_party/prism-plugin-sdk
