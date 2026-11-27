@@ -16,7 +16,7 @@ jobs:
       matrix:
         include:
           - target: macos-arm64
-            runner: macos-14
+            runner: macos-15
             # runner_labels: self-hosted label set used when USE_SELF_HOSTED is
             # unset/true; 'null' falls back to the GitHub-hosted runner above.
             runner_labels: '["self-hosted","macOS","ARM64"]'

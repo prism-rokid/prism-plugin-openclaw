@@ -1,7 +1,7 @@
 {
   "id": "openclaw",
   "name": "OpenClaw Native Adapter",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "publisher": "rokid-official",
   "type": "pluginbridge-plugin",
   "entry": "pluginbridge-plugin.yaml",
